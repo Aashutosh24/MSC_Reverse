@@ -147,3 +147,5 @@ uploads/*
 # DO NOT add .env here — that has the secret service_role key
 
 SETUP.md
+.vercel
+.env*.local
