@@ -1,9 +1,7 @@
 {
-  "functions": {
-    "api/*.js": {
-      "maxDuration": 30
-    }
-  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/public/$1" }
+  ],
   "crons": [
     {
       "path": "/api/cleanup",
