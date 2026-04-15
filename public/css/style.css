@@ -1075,6 +1075,19 @@ button {
   transform: none !important;
 }
 
+/* Login nudge */
+.upload-login-nudge {
+  text-align: center;
+  font-size: .85rem;
+  color: var(--ink-mute);
+  margin: .8rem 0 0;
+}
+
+.upload-login-nudge a {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .spinner {
   width: 18px;
   height: 18px;
@@ -1525,6 +1538,39 @@ button {
    ============================================================ */
 .leaderboard-section {
   padding: 5rem 0 6rem;
+}
+
+.lb-loading {
+  text-align: center;
+  padding: 3rem 0;
+  color: var(--ink-mute);
+  font-size: .92rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .8rem;
+  width: 100%;
+}
+
+.lb-loading::after {
+  content: "";
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--ink-mute);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+.lb-empty {
+  text-align: center;
+  color: var(--ink-mute);
+  font-size: .92rem;
+  font-style: italic;
+  padding: 2rem 1rem;
+  width: 100%;
 }
 
 .leaderboard-section .section-sub {

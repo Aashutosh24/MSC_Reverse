@@ -138,6 +138,12 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
-
+# ── Project-specific ────────────────────────────────────
+# Uploaded files (keep the folder itself via .gitkeep)
 uploads/*
+!uploads/.gitkeep
 
+# Supabase public keys — safe to commit (anon key is intentionally public)
+# DO NOT add .env here — that has the secret service_role key
+
+SETUP.md
