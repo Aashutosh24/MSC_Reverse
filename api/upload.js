@@ -1,8 +1,25 @@
 const { createClient } = require("@supabase/supabase-js");
 const { formidable } = require("formidable");
 const fs = require("fs");
+const { generateQuestionsFromPdf } = require("./gemini");
 
 module.exports.config = { api: { bodyParser: false } };
+
+function extractProjectRefFromUrl(url = "") {
+  const m = String(url).match(/^https:\/\/([a-z0-9-]+)\.supabase\.co/i);
+  return m ? m[1] : "";
+}
+
+function extractProjectRefFromToken(token = "") {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return "";
+    const json = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return String(json?.ref || "");
+  } catch (_) {
+    return "";
+  }
+}
 
 module.exports = async (req, res) => {
   try {
@@ -34,7 +51,18 @@ module.exports = async (req, res) => {
 
     const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
     if (authErr || !user) {
-      return res.status(401).json({ success: false, message: "Session expired. Please login again." });
+      const backendRef = extractProjectRefFromUrl(process.env.SUPABASE_URL);
+      const tokenRef = extractProjectRefFromToken(token);
+      const isProjectMismatch = !!backendRef && !!tokenRef && backendRef !== tokenRef;
+      const reason = authErr?.message || "Invalid auth token";
+
+      return res.status(401).json({
+        success: false,
+        message: isProjectMismatch
+          ? "Session belongs to a different Supabase project. Please log out and log in again."
+          : "Session expired or invalid. Please login again.",
+        reason,
+      });
     }
 
     // ── Parse multipart form ──────────────────────────────
@@ -85,21 +113,36 @@ module.exports = async (req, res) => {
       });
     }
 
-    // ── Mock questions (LLM pending) ──────────────────────
-    const mockQuestions = [
-      { id: 1, question: "What is the primary objective discussed in this document?" },
-      { id: 2, question: "Summarize the key concepts introduced in the first section." },
-      { id: 3, question: "What methodologies or approaches are highlighted?" },
-      { id: 4, question: "Identify any conclusions or outcomes mentioned in the document." },
-      { id: 5, question: "What are the potential real-world applications of the topics covered?" },
-      { id: 6, question: "Are there any limitations or challenges discussed in the document?" },
-    ];
+    let analysis;
+    try {
+      analysis = await generateQuestionsFromPdf({ pdfBuffer: fileBuffer, fileName: originalName });
+    } catch (aiErr) {
+      console.error("Gemini analysis failed:", aiErr);
+      analysis = {
+        summary: "This document appears to describe a real-world application problem and the participant's proposed technical response.",
+        questions: [
+          { id: 1, question: "What exact problem is the application trying to solve, and who feels that pain most strongly?", focus: "Problem framing" },
+          { id: 2, question: "Which part of the system would you redesign first, and why?", focus: "Architecture" },
+          { id: 3, question: "What implementation approach would you use, and what trade-offs does it create?", focus: "Technical approach" },
+          { id: 4, question: "How would you validate the solution and measure whether it works?", focus: "Testing and metrics" },
+          { id: 5, question: "What edge cases, privacy risks, or scaling limits could break the solution?", focus: "Risk analysis" },
+        ],
+        provider: "fallback",
+        aiError: aiErr.message,
+      };
+    }
 
     return res.json({
       success: true,
       file: { originalName, size: file.size },
-      questions: mockQuestions,
-      note: "LLM integration pending — placeholder questions shown.",
+      questions: analysis.questions,
+      analysis: {
+        summary: analysis.summary,
+        provider: analysis.provider || "openrouter",
+      },
+      note: analysis.provider === "fallback"
+        ? "AI analysis fallback questions were used for this document."
+        : "OpenRouter analyzed the PDF and generated five critical questions.",
       warnings: insertErr || rpcErr
         ? [
             ...(insertErr ? [insertErr.message] : []),

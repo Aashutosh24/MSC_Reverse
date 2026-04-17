@@ -10,11 +10,16 @@
 const { createClient } = window.supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+function apiUrl(path) {
+  return `${(typeof API_BASE_URL !== "undefined" ? API_BASE_URL : "")}${path}`;
+}
+
 // ── State ─────────────────────────────────────────────────
 let selectedFile   = null;
 let currentSession = null;
 let currentUser    = null;
 let toastTimer     = null;
+let currentAnalysis = null;
 
 // ── DOM refs ──────────────────────────────────────────────
 const dropZone          = document.getElementById("drop-zone");
@@ -31,6 +36,13 @@ const progressLabel     = document.getElementById("progress-label");
 const questionsSection  = document.getElementById("questions-section");
 const questionsGrid     = document.getElementById("questions-grid");
 const questionsFileName = document.getElementById("questions-file-name");
+const analysisPanel     = document.getElementById("analysis-panel");
+const analysisDocSummary = document.getElementById("analysis-doc-summary");
+const analysisScore     = document.getElementById("analysis-score");
+const analysisFeedback  = document.getElementById("analysis-feedback");
+const analysisBreakdown = document.getElementById("analysis-breakdown");
+const analysisStrengths = document.getElementById("analysis-strengths");
+const analysisImprovements = document.getElementById("analysis-improvements");
 const authGroup         = document.getElementById("auth-group");
 const userChip          = document.getElementById("user-chip");
 const userNameDisplay   = document.getElementById("user-name-display");
@@ -75,7 +87,14 @@ async function handleLogin(e) {
   btn.textContent = "Login";
   btn.disabled    = false;
 
-  if (error) { showToast("❌ " + error.message, "error"); return; }
+  if (error) {
+    if (isEmailNotConfirmedError(error.message)) {
+      showToast("📧 Please verify your email first, then login.", "error");
+      return;
+    }
+    showToast("❌ " + error.message, "error");
+    return;
+  }
   closeModal("login-modal");
 }
 
@@ -89,7 +108,7 @@ async function handleSignup(e) {
   btn.textContent = "Creating…";
   btn.disabled    = true;
 
-  const { error } = await sb.auth.signUp({
+  const { data, error } = await sb.auth.signUp({
     email, password,
     options: { data: { name } },
   });
@@ -98,6 +117,15 @@ async function handleSignup(e) {
   btn.disabled    = false;
 
   if (error) { showToast("❌ " + error.message, "error"); return; }
+
+  // If email confirmation is enabled in Supabase, signup succeeds but no session is created.
+  if (!data?.session) {
+    showToast("📧 Account created. Check your inbox to confirm email before login.");
+    closeModal("signup-modal");
+    setTimeout(() => openModal("login-modal"), 150);
+    return;
+  }
+
   showToast("🎉 Account created! Welcome, " + cap(name) + "!");
   closeModal("signup-modal");
 }
@@ -106,7 +134,7 @@ async function handleLogout() {
   await sb.auth.signOut();
 }
 
-function updateAuthUI() {
+async function updateAuthUI() {
   const loggedIn = !!currentSession;
 
   if (loggedIn && currentUser) {
@@ -116,7 +144,23 @@ function updateAuthUI() {
     userNameDisplay.textContent = cap(name.split(" ")[0]);
     userAvatar.textContent      = name[0].toUpperCase();
     if (loginNudge) loginNudge.classList.add("hidden");
-    if (selectedFile) uploadBtn.disabled = false;
+    
+    // Check if user already has an upload
+    const hasUploaded = await checkUserHasUploaded();
+    if (hasUploaded) {
+      uploadBtn.disabled = true;
+      uploadBtnText.textContent = "Already submitted (1 per student)";
+      dropZone.style.pointerEvents = "none";
+      dropZone.style.opacity = "0.5";
+      fileInput.disabled = true;
+      showToast("📝 You've already submitted one document. Students can upload 1 document per account.");
+    } else {
+      if (selectedFile) uploadBtn.disabled = false;
+      uploadBtnText.textContent = "Analyze Document";
+      dropZone.style.pointerEvents = "auto";
+      dropZone.style.opacity = "1";
+      fileInput.disabled = false;
+    }
   } else {
     authGroup.classList.remove("hidden");
     userChip.classList.add("hidden");
@@ -124,6 +168,23 @@ function updateAuthUI() {
     if (loginNudge) loginNudge.classList.remove("hidden");
   }
   updateMobileAuth();
+}
+
+async function checkUserHasUploaded() {
+  if (!currentUser) return false;
+  try {
+    const { data: profileData, error } = await sb
+      .from("profiles")
+      .select("upload_count")
+      .eq("id", currentUser.id)
+      .single();
+    if (error) {
+      return false;
+    }
+    return (profileData?.upload_count ?? 0) >= 1;
+  } catch (err) {
+    return false;
+  }
 }
 
 function updateMobileAuth() {
@@ -149,15 +210,16 @@ function updateMobileAuth() {
 async function fetchLeaderboard() {
   const podium = document.getElementById("lb-podium");
   const listEl = document.getElementById("lb-list-rows");
-
+  
   if (podium) podium.innerHTML = `<div class="lb-loading">Loading…</div>`;
   if (listEl) listEl.innerHTML = "";
 
   try {
-    const res  = await fetch("/api/leaderboard");
+    const res  = await fetch(apiUrl("/api/leaderboard"));
     const data = await res.json();
+    if (!res.ok) throw new Error(data?.error || "Failed to fetch leaderboard");
     renderLeaderboard(data.leaderboard || []);
-  } catch (_) {
+  } catch (err) {
     if (podium) podium.innerHTML = `<p class="lb-empty">Leaderboard unavailable right now.</p>`;
   }
 }
@@ -170,7 +232,39 @@ function renderLeaderboard(entries) {
   if (podium) {
     if (entries.length === 0) {
       podium.innerHTML = `<p class="lb-empty">No entries yet — upload a document to be first! 🚀</p>`;
+    } else if (entries.length === 1) {
+      // Special case: only 1 entry - show as gold medal winner in center
+      const e = entries[0];
+      const initials = initials2(e.name);
+      podium.innerHTML = `
+        <div class="lb-podium-item lb-gold neo-card">
+          <div class="lb-avatar">${initials}</div>
+          <div class="lb-medal">🏆</div>
+          <p class="lb-uname">${esc(e.name)}</p>
+          <div class="lb-bar-wrap"><div class="lb-bar" style="height:100%"></div></div>
+          <div class="lb-rank-num">1</div>
+        </div>`;
+    } else if (entries.length === 2) {
+      // Special case: 2 entries - show as silver (left) and gold (right)
+      const positions = [
+        { idx: 0, cls: "lb-silver", medal: "🥈", rank: 1, h: "70%" },
+        { idx: 1, cls: "lb-gold",   medal: "🏆", rank: 2, h: "100%" },
+      ];
+      podium.innerHTML = positions.map(({ idx, cls, medal, rank, h }) => {
+        const e = entries[idx];
+        if (!e) return "";
+        const initials = initials2(e.name);
+        return `
+          <div class="lb-podium-item ${cls} neo-card">
+            <div class="lb-avatar">${initials}</div>
+            <div class="lb-medal">${medal}</div>
+            <p class="lb-uname">${esc(e.name)}</p>
+            <div class="lb-bar-wrap"><div class="lb-bar" style="height:${h}"></div></div>
+            <div class="lb-rank-num">${rank}</div>
+          </div>`;
+      }).join("");
     } else {
+      // Standard: 3+ entries - show 2nd · 1st · 3rd
       const positions = [
         { idx: 1, cls: "lb-silver", medal: "🥈", rank: 2, h: "70%" },
         { idx: 0, cls: "lb-gold",   medal: "🏆", rank: 1, h: "100%" },
@@ -185,7 +279,6 @@ function renderLeaderboard(entries) {
             <div class="lb-avatar">${initials}</div>
             <div class="lb-medal">${medal}</div>
             <p class="lb-uname">${esc(e.name)}</p>
-            <p class="lb-count">${e.upload_count} doc${e.upload_count !== 1 ? "s" : ""}</p>
             <div class="lb-bar-wrap"><div class="lb-bar" style="height:${h}"></div></div>
             <div class="lb-rank-num">${rank}</div>
           </div>`;
@@ -193,23 +286,21 @@ function renderLeaderboard(entries) {
     }
   }
 
-  // ── List (rank 4+) ───────────────────────────────────────
+  // ── List (all entries with full ranking) ───────────────────────────────────────
   if (listEl) {
-    const rest = entries.slice(3);
-    if (rest.length === 0) {
-      listEl.innerHTML = `<p class="lb-empty" style="padding:1.5rem 0">Be the first to claim rank 4+!</p>`;
+    if (entries.length === 0) {
+      listEl.innerHTML = `<p class="lb-empty" style="padding:1.5rem 0">Be the first to claim the leaderboard!</p>`;
     } else {
-      const maxScore = Math.max(...rest.map(e => e.score), 1);
-      listEl.innerHTML = rest.map((e, i) => {
+      const maxScore = Math.max(...entries.map(e => e.score), 1);
+      listEl.innerHTML = entries.map((e, i) => {
         const w = Math.round((e.score / maxScore) * 80) + 10;
         return `
           <div class="lb-row neo-card" style="--ri:${i}">
-            <span class="lb-pos">${i + 4}</span>
+            <span class="lb-pos">${i + 1}</span>
             <div class="lb-row-user">
               <div class="lb-row-avatar">${initials2(e.name)}</div>
               <span>${esc(e.name)}</span>
             </div>
-            <span class="lb-docs-count">${e.upload_count}</span>
             <div class="lb-score-wrap">
               <div class="lb-score-bar" style="--w:${w}%"></div>
               <span>${e.score} pts</span>
@@ -221,7 +312,8 @@ function renderLeaderboard(entries) {
 }
 
 function initials2(name = "") {
-  return name.trim().split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "??";
+  const safeName = String(name || "User").trim();
+  return safeName.split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase() || "??";
 }
 
 function esc(s) {
@@ -330,11 +422,23 @@ function formatBytes(b) {
 async function handleUpload() {
   if (!selectedFile) return;
 
-  // Re-check session at upload time
-  const { data: { session } } = await sb.auth.getSession();
-  if (!session) {
+  // Re-check and refresh session at upload time.
+  let { data: { session } } = await sb.auth.getSession();
+  if (session?.expires_at && Date.now() >= (session.expires_at * 1000 - 30000)) {
+    const { data: refreshed, error: refreshErr } = await sb.auth.refreshSession();
+    if (!refreshErr) session = refreshed?.session || session;
+  }
+
+  if (!session?.access_token) {
     showToast("🔐 Please login to analyze documents.", "error");
     openModal("login-modal");
+    return;
+  }
+
+  // Check if user already has uploaded a document
+  const hasUploaded = await checkUserHasUploaded();
+  if (hasUploaded) {
+    showToast("📝 You've already submitted one document. Students can upload 1 per account.", "error");
     return;
   }
 
@@ -348,7 +452,7 @@ async function handleUpload() {
   form.append("document", selectedFile);
 
   try {
-    const res  = await fetch("/api/upload", {
+    const res  = await fetch(apiUrl("/api/upload"), {
       method: "POST",
       headers: { "Authorization": `Bearer ${session.access_token}` },
       body: form,
@@ -360,14 +464,21 @@ async function handleUpload() {
     } catch (_) {
       throw new Error(`Server error (${res.status}): ${text.slice(0, 120)}`);
     }
-    if (!res.ok || !data.success) throw new Error(data.message || "Upload failed");
+    if (!res.ok || !data.success) {
+      if (res.status === 401) {
+        await sb.auth.signOut();
+        openModal("login-modal");
+      }
+      throw new Error(data.message || "Upload failed");
+    }
 
     progressFill.style.width   = "100%";
     progressLabel.textContent  = "Done ✓";
 
     setTimeout(() => {
-      renderQuestions(data.questions, data.file.originalName, data.note);
+      renderQuestions(data.questions, data.file.originalName, data.note, data.analysis);
       fetchLeaderboard(); // Refresh leaderboard after every upload
+      updateAuthUI(); // Disable upload UI after successful upload
     }, 600);
   } catch (err) {
     showToast("❌ " + err.message, "error");
@@ -385,31 +496,35 @@ function animateProgress() {
   }, 220);
 }
 
-function renderQuestions(questions, origName, note) {
+function renderQuestions(questions, origName, note, analysis = {}) {
+  currentAnalysis = {
+    fileName: origName,
+    summary: analysis.summary || note || "",
+    questions,
+  };
+
   questionsGrid.innerHTML = "";
   questions.forEach((q, i) => {
     const card   = document.createElement("div");
     card.className = "question-card";
     card.style.animationDelay = `${i * 0.07}s`;
-    const areaId = `ans-${q.id}`;
     card.innerHTML = `
       <div class="q-num">${q.id}</div>
-      <p class="q-text">${q.question}</p>
+      <p class="q-text">${esc(q.question)}</p>
+      <p class="q-focus">${esc(q.focus || "Explain the application problem, your technical approach, and the trade-offs.")}</p>
       <div class="q-answer-wrap">
-        <button class="q-ans-toggle" onclick="toggleAnswer('${areaId}', this)" aria-expanded="false">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="13" height="13"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-          Write Answer
-        </button>
-        <div class="q-answer-area hidden" id="${areaId}">
-          <textarea class="neo-textarea" placeholder="Write your answer here…" rows="4" aria-label="Your answer for question ${q.id}"></textarea>
-          <p class="q-ans-note">Your answer is private and not saved.</p>
-        </div>
+        <textarea class="neo-textarea" data-question-id="${q.id}" placeholder="Write your answer here…" rows="5" aria-label="Your answer for question ${q.id}"></textarea>
+        <p class="q-ans-note">Your answer is private until you submit for scoring.</p>
       </div>
     `;
     questionsGrid.appendChild(card);
   });
 
   if (questionsFileName) questionsFileName.textContent = `File: ${origName}`;
+
+  if (analysisPanel) analysisPanel.classList.remove("hidden");
+  if (analysisDocSummary) analysisDocSummary.textContent = currentAnalysis.summary || note || "";
+  resetAnalysisPanel();
 
   navResultsLink.classList.remove("hidden");
   questionsSection.classList.remove("hidden");
@@ -432,19 +547,116 @@ function resetAll() {
   questionsSection.classList.add("hidden");
   navResultsLink.classList.add("hidden");
   questionsGrid.innerHTML = "";
+  currentAnalysis = null;
+  resetAnalysisPanel();
   document.getElementById("upload-section").scrollIntoView({ behavior: "smooth" });
 }
 
-// ══════════════════════════════════════════════════════════
-//  ANSWER TOGGLE
-// ══════════════════════════════════════════════════════════
-function toggleAnswer(areaId, btn) {
-  const area     = document.getElementById(areaId);
-  const isHidden = area.classList.contains("hidden");
-  area.classList.toggle("hidden", !isHidden);
-  btn.setAttribute("aria-expanded", isHidden ? "true" : "false");
-  btn.classList.toggle("q-ans-toggle--open", isHidden);
-  if (isHidden) area.querySelector("textarea").focus();
+function resetAnalysisPanel() {
+  if (analysisScore) analysisScore.textContent = "--";
+  if (analysisFeedback) analysisFeedback.textContent = "Submit your answers to get a scored review.";
+  if (analysisBreakdown) analysisBreakdown.innerHTML = "";
+  if (analysisStrengths) analysisStrengths.innerHTML = "";
+  if (analysisImprovements) analysisImprovements.innerHTML = "";
+}
+
+async function submitAnswers() {
+  if (!currentAnalysis || !currentAnalysis.questions.length) {
+    showToast("⚠️ Upload a document first.", "error");
+    return;
+  }
+
+  let { data: { session } } = await sb.auth.getSession();
+  if (session?.expires_at && Date.now() >= (session.expires_at * 1000 - 30000)) {
+    const { data: refreshed, error: refreshErr } = await sb.auth.refreshSession();
+    if (!refreshErr) session = refreshed?.session || session;
+  }
+
+  if (!session?.access_token) {
+    showToast("🔐 Please login to submit your answers.", "error");
+    openModal("login-modal");
+    return;
+  }
+
+  const answers = currentAnalysis.questions.map((question, index) => {
+    const textarea = questionsGrid.querySelectorAll("textarea")[index];
+    return {
+      id: question.id,
+      question: question.question,
+      focus: question.focus || "",
+      answer: textarea ? textarea.value.trim() : "",
+    };
+  });
+
+  const submitBtn = document.getElementById("submit-answers-btn");
+  const originalLabel = submitBtn?.textContent || "Submit Answers for Scoring";
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Scoring…";
+  }
+
+  try {
+    const res = await fetch(apiUrl("/api/grade"), {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${session.access_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        fileName: currentAnalysis.fileName,
+        summary: currentAnalysis.summary,
+        questions: currentAnalysis.questions,
+        answers,
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      if (res.status === 401) {
+        await sb.auth.signOut();
+        openModal("login-modal");
+      }
+      throw new Error(data.message || "Scoring failed");
+    }
+
+    renderScoreResult(data);
+    fetchLeaderboard();
+    showToast(`✅ Scored ${data.score}/100`);
+  } catch (err) {
+    showToast("❌ " + err.message, "error");
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = originalLabel;
+    }
+  }
+}
+
+function renderScoreResult(result) {
+  if (analysisScore) analysisScore.textContent = `${result.score}/100`;
+  if (analysisFeedback) analysisFeedback.textContent = result.feedback || "The submission was scored successfully.";
+
+  if (analysisBreakdown) {
+    analysisBreakdown.innerHTML = (result.breakdown || []).map((item) => `
+      <div class="analysis-breakdown-item">
+        <div class="analysis-breakdown-top">
+          <span>Question ${item.id}</span>
+          <strong>${item.score}/${item.max}</strong>
+        </div>
+        <p>${esc(item.comment || "")}</p>
+      </div>
+    `).join("");
+  }
+
+  if (analysisStrengths) {
+    analysisStrengths.innerHTML = (result.strengths || []).map((item) => `<li>${esc(item)}</li>`).join("") || "<li>Strong answers will appear here.</li>";
+  }
+
+  if (analysisImprovements) {
+    analysisImprovements.innerHTML = (result.improvements || []).map((item) => `<li>${esc(item)}</li>`).join("") || "<li>More specific feedback will appear here.</li>";
+  }
+
+  analysisPanel?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 // ══════════════════════════════════════════════════════════
@@ -489,3 +701,8 @@ function showToast(msg, type = "info") {
 
 // ── Helpers ───────────────────────────────────────────────
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+function isEmailNotConfirmedError(message = "") {
+  const text = String(message).toLowerCase();
+  return text.includes("email not confirmed") || text.includes("email_not_confirmed");
+}
