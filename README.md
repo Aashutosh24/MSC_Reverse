@@ -44,3 +44,23 @@ If your Supabase dashboard shows no tables, you are likely on a fresh project.
 	- storage bucket: `documents`
 4. Ensure `public/js/config.js` and backend `.env` use the same Supabase project URL.
 5. Log out and log in again in the browser to refresh your auth token.
+
+## Deploy on Netlify
+
+This repository is preconfigured for Netlify static hosting + Netlify Functions.
+
+1. Push this project to GitHub.
+2. In Netlify, choose **Add new site** -> **Import an existing project**.
+3. Use these build settings:
+	- Base directory: `MSC_Reverse` (if your repo root is one level above this folder)
+	- Build command: leave empty
+	- Publish directory: `public`
+	- Functions directory: `netlify/functions`
+4. Add all environment variables from `.env.example` in Netlify Site settings -> Environment variables.
+5. Deploy.
+
+After deploy:
+
+- Frontend loads from `/`.
+- API endpoints are available at `/api/upload`, `/api/grade`, `/api/leaderboard`, `/api/cleanup`.
+- A scheduled function (`netlify/functions/cleanup-scheduled.js`) runs daily at 02:00 UTC.
